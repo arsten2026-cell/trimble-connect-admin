@@ -1,0 +1,23 @@
+{
+  "panel": "admin",
+  "repo": "arsten2026-cell/trimble-connect-admin",
+  "id": "e6f0df4316",
+  "built": "2026-11-16T21:52:13.922Z",
+  "files": {
+    "app.js": "dd94cc1cc3",
+    "expected.js": "228590722a",
+    "health.js": "634be6fbf7",
+    "psetapi.js": "cb56112323",
+    "arsten-access.js": "c29c3b3f4f",
+    "arsten-backup.js": "28ec966847",
+    "arsten-photos.js": "f0a7981489",
+    "arsten-acceptance.js": "585d7387c0",
+    "status.js": "157dd5a2f6",
+    "stages.js": "e1a886962e",
+    "records.js": "f037461491",
+    "fabrication.js": "4c88ed8002",
+    "manifest.json": "c56915d474",
+    "icon.svg": "d160a96998",
+    "index.html": "79fc0ed57a"
+  }
+}

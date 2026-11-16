@@ -1,0 +1,234 @@
+// Minimal client for Trimble Connect's Property Set service (pset-api) and Organizer (org-api), following what
+// Connect web itself does (its webcomponents bundle, 2026-11):
+//  - project libraries are listed as links "frn:lib:{libId}" on Organizer node
+//    forests/project:{projectId}:data / trees/ProjectContext / nodes/PSetLibs
+//  - definitions: GET/POST/PATCH libs/{lib}/defs[/{def}]
+//  - values ("psets") on a model object: link frn:entity:{IFC GUID}; PATCH psets/{link}/{lib}/{def} {props}
+//  - many at once: POST batch-get {psets:[{link, libId, defId}]}
+(function (root) {
+  "use strict";
+  const REGIONS = {
+    europe: "eu-west-1", eu: "eu-west-1", uk: "eu-west-2", northamerica: "us-east-1", us: "us-east-1",
+    asia: "ap-southeast-1", australia: "ap-southeast-2",
+  };
+  const hostFor = (svc, region) => (region === "master" ? `https://${svc}-api.connect.trimble.com/v1/` : `https://${svc}-api.${region}.connect.trimble.com/v1/`);
+
+  const psetPath = (link, libId, defId) => `psets/${encodeURIComponent(link)}/${encodeURIComponent(libId)}/${encodeURIComponent(defId)}`;
+  /** Drop empty values: the service has no "empty" for typed fields; leaving a field out means "no value". */
+  const clean = (props) => Object.fromEntries(Object.entries(props || {}).filter(([, v]) => v !== null && v !== undefined && v !== ""));
+
+  /** i18n of a definition after adding fields: what is already in Connect (edited by hand) wins - names, labels and
+   *  the order of existing fields; only the labels of new fields are added, and "__prop-order__" puts them at the end. */
+  function mergeI18n(cur, want, missing) {
+    if (!cur) return want;
+    const out = Object.assign({}, cur);
+    for (const [loc, w] of Object.entries(want || {})) {
+      const c = cur[loc];
+      if (!c) { out[loc] = w; continue; }
+      const props = Object.assign({}, c.props || {});
+      if (loc === "__prop-order__") {
+        let next = Math.max(-1, ...Object.values(props).map(Number).filter((n) => Number.isFinite(n))) + 1;
+        const add = missing.filter((k) => !(k in props)).sort((a, b) => Number((w.props || {})[a]) - Number((w.props || {})[b]));
+        for (const k of add) props[k] = String(next++);
+      } else for (const k of missing) if (!(k in props) && w.props && k in w.props) props[k] = w.props[k];
+      out[loc] = Object.assign({}, w, c, { props });
+    }
+    return out;
+  }
+  /** PATCH body that adds only the missing fields to an existing definition (M12): existing field types, name,
+   *  description and i18n stay as they are in Connect. */
+  function extendBody(cur, def, missing) {
+    const props = Object.assign({}, cur.schema.props);
+    for (const k of missing) props[k] = def.schema.props[k];
+    return {
+      name: cur.name || def.name,
+      description: cur.description != null ? cur.description : def.description,
+      schema: Object.assign({}, cur.schema, { props }),
+      i18n: mergeI18n(cur.i18n, def.i18n, missing),
+      v: cur.v,
+    };
+  }
+
+  class ApiError extends Error {
+    constructor(status, message, body) { super(message); this.status = status; this.body = body; }
+  }
+
+  class PsetClient {
+    /** @param opts {region: "eu-west-1" | project location, getToken: async (refresh) => token} */
+    constructor(opts) {
+      const r = String(opts.region || "eu-west-1").toLowerCase().replace(/[\s_-]/g, "");
+      this.region = /^[a-z]{2}(west|east|southeast)\d$/.test(r) ? opts.region : REGIONS[r] || "eu-west-1";
+      this.getToken = opts.getToken;
+    }
+    async request(svc, path, method = "GET", body) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const token = await this.getToken(attempt > 0);
+        const res = await fetch(hostFor(svc, this.region) + path, {
+          method,
+          headers: Object.assign({ Authorization: "Bearer " + token }, body !== undefined ? { "Content-Type": "application/json" } : {}),
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+        if (res.status === 401 && attempt === 0) continue;   // token expired: ask Connect for a fresh one
+        const text = await res.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+        if (!res.ok) throw new ApiError(res.status, `${svc}-api ${method} ${path.split("?")[0]}: ${res.status} ${(data && (data.message || data.errorcode || data.code)) || ""}`.trim(), data);
+        return data;
+      }
+    }
+
+    /** Library ids registered for the project (what Connect's "Property Set Libraries" page lists). */
+    async projectLibraryIds(projectId) {
+      try {
+        const node = await this.request("org", `forests/${encodeURIComponent(`project:${projectId}:data`)}/trees/ProjectContext/nodes/PSetLibs`);
+        return ((node && node.links) || []).map((l) => {
+          const m = /^frn:lib:(.+)$/.exec(l);
+          return m ? decodeURIComponent(m[1]) : null;
+        }).filter(Boolean);
+      } catch (e) {
+        if (e.status === 404) return [];
+        throw e;
+      }
+    }
+    getLibrary(libId) { return this.request("pset", `libs/${encodeURIComponent(libId)}`); }
+
+    /** Find the project library with one of these names (first match in list order wins; case and spaces ignored).
+     *  Returns {lib, others} (others: names seen, for messages). */
+    async findLibrary(projectId, names) {
+      const norm = (x) => String(x || "").replace(/\s+/g, "").toLowerCase();
+      const want = (Array.isArray(names) ? names : [names]).map(norm);
+      const ids = await this.projectLibraryIds(projectId);
+      const others = [], hits = [];
+      let denied = 0;   // libraries of the project this user may not read: "no access", never "missing" (week 1, F9)
+      for (const id of ids) {
+        try {
+          const lib = await this.getLibrary(id);
+          const rank = lib ? want.indexOf(norm(lib.name)) : -1;
+          if (rank >= 0) hits.push({ rank, lib });
+          else if (lib) others.push(lib.name);
+        } catch (e) { if (e.status === 403) denied++; else if (e.status !== 404) throw e; }
+      }
+      hits.sort((a, b) => a.rank - b.rank);
+      return { lib: hits.length ? hits[0].lib : null, others, denied };
+    }
+
+    /** Make sure the status definition exists in the library and has all fields (creates or extends it). */
+    async ensureDefinition(libId, def) {
+      let cur = null;
+      try { cur = await this.request("pset", `libs/${encodeURIComponent(libId)}/defs/${encodeURIComponent(def.id)}`); }
+      catch (e) { if (e.status !== 404) throw e; }
+      if (!cur) return { def: await this.request("pset", `libs/${encodeURIComponent(libId)}/defs`, "POST", def), created: true };
+      const have = Object.keys((cur.schema && cur.schema.props) || {});
+      const missing = Object.keys(def.schema.props).filter((p) => !have.includes(p));
+      if (!missing.length) return { def: cur, created: false };
+      const upd = await this.request("pset", `libs/${encodeURIComponent(libId)}/defs/${encodeURIComponent(def.id)}`, "PATCH",
+        extendBody(Object.assign({}, cur, { schema: Object.assign({ props: {} }, cur.schema) }), def, missing));
+      return { def: upd, created: false, extended: missing };
+    }
+
+    /** Read the status of many objects. Returns Map link -> props. */
+    async readMany(libId, defId, links) {
+      const out = new Map();
+      for (let i = 0; i < links.length; i += 100) {
+        const chunk = links.slice(i, i + 100);
+        const res = await this.request("pset", "batch-get", "POST", { psets: chunk.map((link) => ({ link, libId, defId })) });
+        const got = (res && res.responses && res.responses.psets) || [];
+        for (const p of got) if (p && p.link && !p.deleted) out.set(p.link, p.props || {});
+      }
+      return out;
+    }
+
+    /**
+     * Every pset of a definition (also of objects no longer in the model), as the official JS SDK's
+     * listPSetsByDefinition: GET libs/{lib}/defs/{def}/psets?top=&skiptoken=&link=, paged by `next`.
+     * Returns Map link -> props (deleted psets skipped). Two items of the same object can come back with the same link
+     * text (a "$" GUID stored raw and URL-encoded): the second one is kept under the other form of the link instead of
+     * overwriting the first (callers decode links to GUIDs and re-read such objects in both forms).
+     */
+    async listAll(libId, defId, linkPrefix) {
+      const out = new Map();
+      const q = (tok) => ["top=500", linkPrefix ? "link=" + encodeURIComponent(linkPrefix) : "", tok ? "skiptoken=" + encodeURIComponent(tok) : ""].filter(Boolean).join("&");
+      let path = `libs/${encodeURIComponent(libId)}/defs/${encodeURIComponent(defId)}/psets?${q()}`;
+      for (let page = 0; path && page < 200; page++) {
+        const res = await this.request("pset", path);
+        for (const p of (res && res.items) || []) if (p && p.link && !p.deleted) addListed(out, p.link, p.props || {});
+        const next = res && res.next;
+        if (!next) break;
+        if (/^https?:/.test(next)) {   // absolute link: keep only the part after the service root
+          const m = /\/v1\/(.+)$/.exec(next);
+          path = m ? m[1] : null;
+        } else if (/^[?&]?skiptoken=/i.test(next) || !/[/?]/.test(next)) {
+          path = `libs/${encodeURIComponent(libId)}/defs/${encodeURIComponent(defId)}/psets?${q(next.replace(/^[?&]?skiptoken=/i, ""))}`;
+        } else path = next.replace(/^\//, "").replace(/^v1\//, "");
+      }
+      return out;
+    }
+
+    /** Library access policy (needs pset:GetLibraryPolicy / org:UpdateLibraryPolicy; project admins). */
+    getPolicy(libId) { return this.request("pset", `libs/${encodeURIComponent(libId)}/policy`); }
+    putPolicy(libId, policy) { return this.request("pset", `libs/${encodeURIComponent(libId)}/policy`, "PUT", policy); }
+
+    /** Write (create or update) the status of one object. PATCH merges: fields left out keep their value. */
+    write(libId, defId, link, props) {
+      return this.request("pset", psetPath(link, libId, defId), "PATCH", { props: clean(props) });
+    }
+
+    /** One pset with its version: {props, v}; props is null when the pset was deleted (v still returned, so a new
+     *  write can go on top of it); null when it never existed. */
+    async readOne(libId, defId, link) {
+      const path = psetPath(link, libId, defId);
+      let p = null;
+      try { p = await this.request("pset", path); } catch (e) { if (e.status !== 404) throw e; }
+      if (p && !p.deleted) return { props: p.props || {}, v: p.v };
+      try { const d = await this.request("pset", path + "?deleted"); if (d) return { props: null, v: d.v }; } catch (e) { if (e.status !== 404) throw e; }
+      return p ? { props: null, v: p.v } : null;
+    }
+
+    /** Merge-write (PATCH) carrying the version read with readOne, so a write made by someone else in between
+     *  is refused (412/409) instead of overwritten. v undefined: plain create / merge. */
+    writeIfUnchanged(libId, defId, link, props, v) {
+      const body = { props: clean(props) };
+      if (v !== undefined && v !== null) body.v = v;
+      return this.request("pset", psetPath(link, libId, defId), "PATCH", body);
+    }
+
+    /** Delete one pset; no error when it does not exist (404) or is already deleted (410). */
+    async remove(libId, defId, link) {
+      try { await this.request("pset", psetPath(link, libId, defId), "DELETE"); } catch (e) { if (e.status !== 404 && e.status !== 410) throw e; }
+    }
+
+    /** Replace the whole status of one object, so fields can be cleared (pset-api rejects "" and null for typed
+     *  fields, and PATCH cannot remove a field). Same as Connect web: delete, then re-create; if the deleted pset
+     *  still blocks (412), re-create on top of its version. */
+    async replace(libId, defId, link, props) {
+      const path = psetPath(link, libId, defId);
+      try { await this.request("pset", path, "DELETE"); } catch (e) { if (e.status !== 404) throw e; }
+      const body = { props: clean(props) };
+      try { return await this.request("pset", path, "PATCH", body); }
+      catch (e) {
+        if (e.status !== 412 && e.status !== 409) throw e;
+        const del = await this.request("pset", path + "?deleted");
+        return this.request("pset", path, "PATCH", Object.assign(body, { v: del && del.v }));
+      }
+    }
+  }
+
+  /** listAll's map insert: never overwrite a link already listed (see listAll). */
+  function addListed(out, link, props) {
+    if (!out.has(link)) return out.set(link, props);
+    const m = /^frn:entity:(.*)$/.exec(link);
+    if (m) {
+      let g = m[1];
+      try { g = decodeURIComponent(g); } catch {}
+      const enc = "frn:entity:" + encodeURIComponent(g), raw = "frn:entity:" + g;
+      const alt = link === enc ? raw : enc;
+      if (alt !== link && !out.has(alt)) return out.set(alt, props);
+    }
+    console.warn("pset listed twice under the same link; the first one is kept", link);
+    return out;
+  }
+
+  const lib = { PsetClient, ApiError, hostFor, clean, extendBody, mergeI18n, addListed };
+  if (typeof module === "object" && module.exports) module.exports = lib;
+  else root.PsetApi = lib;
+})(typeof self !== "undefined" ? self : this);
