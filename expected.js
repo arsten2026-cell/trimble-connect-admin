@@ -43,6 +43,8 @@
           { group: "00_ADMIN", lib: "edit", defs: { acceptdecision: "read" } },
           { group: "4.1-STRUCTURAL DESIGNER", lib: "read", defs: { acceptance: "read", acceptdecision: "edit" } },
           { group: "02.1-EXECUTION PROJECT MANAGER", lib: "edit", defs: { acceptdecision: "read" } },
+          // Owner decision 2 (17.11.2026): the client reads only the summaries in _ArstenDocs/Client
+          { group: "01.CLIENT", lib: "none", defs: {} },
         ],
       },
     },
