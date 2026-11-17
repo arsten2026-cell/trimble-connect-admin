@@ -78,18 +78,22 @@
   async function folderIndex(rootId) {
     const cache = new Map(), out = {}, ids = {};
     const children = async (id) => { if (!cache.has(id)) cache.set(id, items(await state.core.req(`folders/${encodeURIComponent(id)}/items`))); return cache.get(id); };
+    // The tool folder _AM_Docs (renamed from _ArstenDocs on 17.11.2026): a project that still has only the old folder is
+    // checked inside the old one, the same folder the tools use, so "create missing" never makes an empty second one.
+    const rootItems = rootId ? await children(rootId) : [];
+    const docs = { now: findFolder(rootItems, E.DOCS), old: findFolder(rootItems, E.DOCS_OLD) };
     for (const path of E.FOLDERS) {
       let id = rootId;
       const parts = path.split("/");
       for (let i = 0; i < parts.length; i++) {
-        const f = id && findFolder(await children(id), parts[i]);
+        const f = id && (i === 0 && parts[0] === E.DOCS ? docs.now || docs.old : findFolder(await children(id), parts[i]));
         id = f ? f.id : null;
         if (!id) break;
         ids[parts.slice(0, i + 1).join("/")] = id;
       }
       out[path] = id;
     }
-    return { leaves: out, ids };
+    return { leaves: out, ids, docs: { now: !!docs.now, old: !!docs.old } };
   }
 
   async function gatherSetup() {
@@ -126,7 +130,7 @@
         catch (e) { if (e.status === 404) snap.defs[spec.key][d.id] = null; else throw e; }
       }
     }
-    if (snap.rootId) { const fi = await folderIndex(snap.rootId); snap.folders = fi.leaves; snap.folderIds = fi.ids; }
+    if (snap.rootId) { const fi = await folderIndex(snap.rootId); snap.folders = fi.leaves; snap.folderIds = fi.ids; snap.docs = fi.docs; }
     return snap;
   }
 
@@ -177,7 +181,7 @@
   // ---------- policy rewrite (round 9, H2) ----------
   // policyAsk: a fresh GET of the policy, the member count of every group involved, a before -> after table, and the
   // reasons it is refused. policyGo: GET again (abort when it changed since the confirm opened), save the current
-  // policy to _ArstenDocs/Backups (or download it; stop when neither worked), then PUT.
+  // policy to _AM_Docs/Backups (or download it; stop when neither worked), then PUT.
   const sameUser = (a, b) => !!a && !!b && ((a.id && b.id && a.id === b.id) || (a.email && b.email && String(a.email).toLowerCase() === String(b.email).toLowerCase())
     || (a.tiduuid && b.tiduuid && a.tiduuid === b.tiduuid));
   const groupName = (id) => ((state.snap.groups || []).find((g) => g.id === id) || {}).name || id;
@@ -227,7 +231,7 @@
     setStatus(state.confirm.refusals.length ? L2("Пренаписването е спряно – вижте причините.", "The rewrite is refused – see the reasons.") : L2("Проверете промените и потвърдете.", "Check the changes and confirm."), !!state.confirm.refusals.length);
   }
 
-  /** Save the current policy before the PUT: upload to _ArstenDocs/Backups/<day>/admin-policy-<lib>-<HHMMSSmmm>.json, or
+  /** Save the current policy before the PUT: upload to _AM_Docs/Backups/<day>/admin-policy-<lib>-<HHMMSSmmm>.json, or
    *  download it. Returns {ok, text} – ok false when neither worked (the PUT must not run). */
   async function backupPolicy(c, policy) {
     const B = window.ArstenBackup;
@@ -236,11 +240,11 @@
     const snapshot = { type: "arsten-backup", version: B.VERSION, kind: "library-policy", tool: "admin", action: "policy-" + c.libName,
       project: { id: state.project.id, name: state.project.name || "" }, by: (state.me && state.me.name) || "", at: at.toISOString(),
       library: { id: c.libId, name: c.libName }, policy, records: [] };
-    // folder ids found by the setup check (case-insensitive names), so the backup never makes a second "_ArstenDocs"
+    // folder ids found by the setup check (case-insensitive names), so the backup never makes a second "_AM_Docs"
     const cache = new Map(), ids = state.snap.folderIds || {}, root = state.snap.rootId;
     if (root) {
       cache.set("root:" + state.project.id, root);
-      if (ids["_ArstenDocs"]) { cache.set(root + "/_ArstenDocs", ids["_ArstenDocs"]); if (ids["_ArstenDocs/Backups"]) cache.set(ids["_ArstenDocs"] + "/Backups", ids["_ArstenDocs/Backups"]); }
+      if (ids["_AM_Docs"]) { cache.set(root + "/_AM_Docs", ids["_AM_Docs"]); if (ids["_AM_Docs/Backups"]) cache.set(ids["_AM_Docs"] + "/Backups", ids["_AM_Docs/Backups"]); }
     }
     const res = await B.save({ core: state.core, projectId: state.project.id, snapshot, cache, fetch: window.ARSTEN_ADMIN_FETCH,
       download: (name, text) => { try { download(name, text, "application/json"); return true; } catch (e) { console.warn("download failed", e); return false; } } });
@@ -463,7 +467,7 @@
     const losing = c.change.rows.filter((r) => r.losesAll);
     if (losing.length) h += `<div class="bad">${esc(L2("Губят всякакъв достъп: ", "Lose all access: ") + losing.map((r) => (r.who === "default" ? L2("всички членове без група", "all members without a group") : r.who)).join(", "))}</div>`;
     if (c.change.unknown.length) h += `<div class="bad">${esc(L2(`Премахват се ${c.change.unknown.length} правила, които панелът не разпознава (Deny или непознат получател).`, `${c.change.unknown.length} statements the panel does not recognise (Deny or unknown principal) are removed.`))}</div>`;
-    h += `<div class="sub">${esc(L2("Преди записа правата се четат отново (ако са променени междувременно – спира) и текущите се архивират в _ArstenDocs/Backups (или се изтеглят).", "Before the write the access is read again (it stops if it changed meanwhile) and the current one is saved to _ArstenDocs/Backups (or downloaded)."))}</div>`;
+    h += `<div class="sub">${esc(L2("Преди записа правата се четат отново (ако са променени междувременно – спира) и текущите се архивират в _AM_Docs/Backups (или се изтеглят).", "Before the write the access is read again (it stops if it changed meanwhile) and the current one is saved to _AM_Docs/Backups (or downloaded)."))}</div>`;
     if (c.refusals.length) h += `<div class="bad"><b>${esc(L2("Не може да се пренапише:", "Cannot rewrite:"))}</b>${c.refusals.map((x) => `<div>• ${esc(T(x))}</div>`).join("")}</div>`;
     h += `<div class="bar">${c.refusals.length ? "" : `<button class="small danger" data-act="policyGo" data-lib="${esc(c.key)}" ${state.busy ? "disabled" : ""}>${esc(L2("Да, пренапиши", "Yes, rewrite"))}</button>`}
       <button class="small secondary" data-act="policyNo">${esc(c.refusals.length ? L2("Затвори", "Close") : L2("Отказ", "Cancel"))}</button></div></div>`;

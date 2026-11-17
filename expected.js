@@ -43,7 +43,7 @@
           { group: "00_ADMIN", lib: "edit", defs: { acceptdecision: "read" } },
           { group: "4.1-STRUCTURAL DESIGNER", lib: "read", defs: { acceptance: "read", acceptdecision: "edit" } },
           { group: "02.1-EXECUTION PROJECT MANAGER", lib: "edit", defs: { acceptdecision: "read" } },
-          // Owner decision 2 (17.11.2026): the client reads only the summaries in _ArstenDocs/Client
+          // Owner decision 2 (17.11.2026): the client reads only the summaries in _AM_Docs/Client
           { group: "01.CLIENT", lib: "none", defs: {} },
         ],
       },
@@ -80,8 +80,9 @@
   /** The REPORT_ONLY row for a project's library, or null. */
   const reportOnly = (projectId, libKey) => REPORT_ONLY.find((r) => r.projectId === projectId && r.libs.includes(libKey)) || null;
 
+  const DOCS = "_AM_Docs", DOCS_OLD = "_ArstenDocs";   // tool folder, renamed 17.11.2026
   const FOLDERS = [
-    "_ArstenDocs/Photos", "_ArstenDocs/Fabrication", "_ArstenDocs/Submittals", "_ArstenDocs/Transmittals", "_ArstenDocs/Backups", "_ArstenDocs/Client",
+    "_AM_Docs/Photos", "_AM_Docs/Fabrication", "_AM_Docs/Submittals", "_AM_Docs/Transmittals", "_AM_Docs/Backups", "_AM_Docs/Client",
     "01_BIM",
     "03_DESIGN/03_TECHNICAL LIVE MODELS", "03_DESIGN/04_STRUCTURAL DESIGN EXPORT MODELS",
     "04_EXECUTION/00_MODELS", "04_EXECUTION/01_ЗА СТАНЦИЯ", "04_EXECUTION/20_FORMWORK PLANS",
@@ -366,6 +367,13 @@
       }
     }
 
+    const docs = snap.docs || {};
+    if (docs.old && docs.now) add("folders", "docs-name", "bad", `Две папки ${DOCS} и ${DOCS_OLD}`, `Two folders ${DOCS} and ${DOCS_OLD}`, { detail: {
+      bg: `инструментите четат само ${DOCS}; преместете съдържанието на ${DOCS_OLD} в ${DOCS} и изтрийте празната папка`,
+      en: `the tools read only ${DOCS}; move the contents of ${DOCS_OLD} into ${DOCS} and delete the empty folder` } });
+    else if (docs.old) add("folders", "docs-name", "warn", `Папката се казва ${DOCS_OLD}`, `The folder is named ${DOCS_OLD}`, { detail: {
+      bg: `преименувайте я на ${DOCS} в Connect (Rename – файловете и връзките остават); дотогава инструментите ползват старата`,
+      en: `rename it to ${DOCS} in Connect (Rename keeps files and links); until then the tools use the old one` } });
     for (const path of FOLDERS) {
       const ok = !!(snap.folders || {})[path];
       add("folders", "folder:" + path, ok ? "ok" : "bad", "/" + path, "/" + path, ok ? {} : { detail: { bg: "липсва", en: "missing" }, fix: { kind: "folder", path } });
@@ -402,6 +410,6 @@
       : [`Създайте я в Property Set Libraries с името „${name}“:`, `1. Отворете ${url} (проектът → Property Set Libraries).`, "2. Нова библиотека (New library) → Name: " + name + " → Save.", "3. Върнете се тук и натиснете „Създай липсващите“ за дефинициите, после пренапишете правата ѝ."];
   }
 
-  return { GROUPS, ADMIN_GROUP, LIBRARIES, REPORT_ONLY, reportOnly, groupKeyOf, FOLDERS, ACTIONS, PROJADM_ACTIONS, definitionBodies, buildPolicy, effectiveAccess, comparePolicy,
+  return { DOCS, DOCS_OLD, GROUPS, ADMIN_GROUP, LIBRARIES, REPORT_ONLY, reportOnly, groupKeyOf, FOLDERS, ACTIONS, PROJADM_ACTIONS, definitionBodies, buildPolicy, effectiveAccess, comparePolicy,
     samePolicy, policyChange, levelOf, covers, evaluateSetup, plannedFixes, folderSteps, libraryHelp };
 });
