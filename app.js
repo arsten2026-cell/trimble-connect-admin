@@ -15,8 +15,12 @@
   const ACCESS_CONFIG = { apps: { projectAdmin: ["admin"] } };
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  let lang = (() => { try { return localStorage.getItem("arsten.admin.lang") || "bg"; } catch { return "bg"; } })();
+  // one language for all tools (A10): shared key "arsten.lang" (shared/arsten-i18n.js), the old key read once
+  const I18N = window.ArstenI18n, OLD_LANG = ["arsten.admin.lang"];
+  let lang = I18N ? I18N.getLang(OLD_LANG) : "bg";
   const L2 = (b, e) => (lang === "bg" ? b : e);
+  // counted forms (round 19 L6): countWord(1, "запис", "записа", "record", "records") = "1 запис"
+  const countWord = (n, one, many, en1, enN) => `${n} ${lang === "bg" ? (Math.abs(Number(n)) === 1 ? one : many) : (Math.abs(Number(n)) === 1 ? en1 : enN)}`;
   const T = (o) => (o ? (lang === "bg" ? o.bg : o.en) : "");
   const state = {
     api: null, client: null, core: null, project: null, access: null, tab: "setup", busy: false,
@@ -25,9 +29,12 @@
   };
   const bodies = () => E.definitionBodies({ PourStatus: window.PourStatus, ArstenStages: window.ArstenStages, ArstenPhotos: window.ArstenPhotos,
     ArstenAcceptance: window.ArstenAcceptance, SteelRecords: window.SteelRecords, SteelFab: window.SteelFab });
-  const setStatus = (t, bad) => { $("status").textContent = t || ""; $("status").className = "status" + (bad ? " bad" : ""); };
+  // t may be a function: then it is built again in the new language after a language switch (round 19 L4)
+  let statusAgain = null;
+  const setStatus = (t, bad) => { statusAgain = typeof t === "function" ? { t, bad } : null; if (typeof t === "function") t = t(); $("status").textContent = t || ""; $("status").className = "status" + (bad ? " bad" : ""); };
+  const relabelStatus = () => { if (statusAgain) setStatus(statusAgain.t, statusAgain.bad); if (window.ArstenDiag && ArstenDiag.relabel) ArstenDiag.relabel(); };
   const errText = (e) => (e && (e.message || e.toString())) || String(e);
-  const guarded = (fn) => Promise.resolve().then(fn).catch((e) => { console.error(e); setStatus(errText(e), true); }).finally(() => { state.busy = false; render(); });
+  const guarded = (fn) => Promise.resolve().then(fn).catch((e) => { console.error(e); setStatus(I18N ? I18N.err(errText(e), lang) : errText(e), true); }).finally(() => { state.busy = false; render(); });
   // role checks work with the single role (access.role) and with the role union of multi-group users (access.roles)
   const hasRole = (r) => !!(state.access && (state.access.role === r || (Array.isArray(state.access.roles) && state.access.roles.includes(r))));
   const isAdmin = () => hasRole("admin");
@@ -43,12 +50,22 @@
   // ---------- access token ----------
   let token = null, waiters = [];
   function onToken(tk) { token = tk; const w = waiters; waiters = []; w.forEach((f) => f(tk)); }
+  // Round 17 L3 (the round 12 L6 fix of Монолитен бетон / Стомана): the waiter is registered before asking (the token
+  // event may come while requestPermission runs). When Connect returns the token directly, refuses or throws, the waiter
+  // and its 60 s timer are dropped, so no stray "No access token" rejection is logged a minute later.
   async function getToken(refresh) {
     if (token && !refresh) return token;
-    const p = new Promise((resolve, reject) => { waiters.push(resolve); setTimeout(() => reject(new Error("No access token from Trimble Connect")), 60000); });
-    const r = await state.api.extension.requestPermission("accesstoken");
-    if (r === "denied") throw new Error("Access to Trimble Connect data was denied for this extension.");
-    if (r && r !== "pending" && r !== "granted") { token = r; return r; }
+    let timer = 0, done = null;
+    const p = new Promise((resolve, reject) => {
+      done = (tk) => { clearTimeout(timer); resolve(tk); };
+      waiters.push(done);
+      timer = setTimeout(() => { waiters = waiters.filter((f) => f !== done); reject(new Error(L2("Trimble Connect не даде ключ за достъп", "No access token from Trimble Connect"))); }, 60000);
+    });
+    const drop = () => { clearTimeout(timer); waiters = waiters.filter((f) => f !== done); p.catch(() => {}); };
+    let r;
+    try { r = await state.api.extension.requestPermission("accesstoken"); } catch (e) { drop(); throw e; }
+    if (r === "denied") { drop(); throw new Error(L2("Достъпът до данните в Trimble Connect е отказан за това разширение.", "Access to Trimble Connect data was denied for this extension.")); }
+    if (r && r !== "pending" && r !== "granted") { drop(); token = r; return r; }
     return p;
   }
   const items = (x) => (Array.isArray(x) ? x : (x && x.items) || []);
@@ -118,7 +135,7 @@
     state.setup = E.evaluateSetup(state.snap, bodies());
     const n = (s) => state.setup.items.filter((i) => i.state === s).length;
     const bad = n("bad"), warn = n("warn"), unk = n("unknown");
-    setStatus(bad || warn || unk ? L2(`${bad} за оправяне · ${warn} предупреждения${unk ? ` · ${unk} неизвестни` : ""}`, `${bad} to fix · ${warn} warnings${unk ? ` · ${unk} unknown` : ""}`)
+    setStatus(() => bad || warn || unk ? L2(`${bad} за оправяне · ${warn} предупреждения${unk ? ` · ${unk} неизвестни` : ""}`, `${bad} to fix · ${warn} warnings${unk ? ` · ${unk} unknown` : ""}`)
       : L2("Проектът е като AM_TEMPLATE.", "The project matches AM_TEMPLATE."), !!bad);
   }
 
@@ -283,7 +300,7 @@
     }
     state.data = { records: recs, libs, at: new Date(), noAccess, errors };
     const deniedLibs = [...new Set(noAccess.map((k) => k.split("|")[0]))];
-    setStatus(L2(`${recs.length} записа в ${libs.length} библиотеки`, `${recs.length} records in ${libs.length} libraries`)
+    setStatus(() => `${countWord(recs.length, "запис", "записа", "record", "records")} ${L2("в", "in")} ${countWord(libs.length, "библиотека", "библиотеки", "library", "libraries")}`
       + (deniedLibs.length ? L2(` · няма достъп: ${deniedLibs.join(", ")}`, ` · no access: ${deniedLibs.join(", ")}`) : ""), !!deniedLibs.length);
   }
 
@@ -354,7 +371,7 @@
     state.report = H.health(state.data.records, check, defsByLib, state.data.noAccess);
     const n = state.report.issues.length;
     const denied = [...new Set((state.data.noAccess || []).map((k) => k.split("|")[0]))];
-    setStatus((n ? L2(`${n} забележки`, `${n} findings`) : L2("Няма забележки.", "No findings."))
+    setStatus(() => (n ? countWord(n, "забележка", "забележки", "finding", "findings") : L2("Няма забележки.", "No findings."))
       + (denied.length ? L2(` · няма достъп до ${denied.join(", ")} (не е проверено)`, ` · no access to ${denied.join(", ")} (not checked)`) : ""), !!denied.length);
   }
 
@@ -368,7 +385,8 @@
     if (!sel.length) return setStatus(L2("Обектите не са в заредените модели.", "The objects are not in the loaded models."), true);
     await state.api.viewer.setSelection({ modelObjectIds: sel }, "set");
     try { await state.api.viewer.setCamera({ modelObjectIds: sel }, { animationTime: 400 }); } catch {}
-    setStatus(L2(`Избрани ${sel.reduce((n, s) => n + s.objectRuntimeIds.length, 0)} обекта.`, `${sel.reduce((n, s) => n + s.objectRuntimeIds.length, 0)} objects selected.`));
+    const k = sel.reduce((n, s) => n + s.objectRuntimeIds.length, 0);
+    setStatus(L2(`${k === 1 ? "Избран" : "Избрани"} ${countWord(k, "обект", "обекта")}.`, `${k} ${k === 1 ? "object" : "objects"} selected.`));
   }
 
   function download(name, text, type) {
@@ -384,7 +402,7 @@
     const a = H.archive({ created: new Date().toISOString(), project: { id: state.project.id, name: state.project.name || "" } }, state.data.libs);
     download(`arsten-archive_${fileStem()}.json`, JSON.stringify(a, null, 1), "application/json");
     const na = state.data.noAccess || [];
-    setStatus(L2(`Архивът е изтеглен (${state.data.records.length} записа).`, `Archive downloaded (${state.data.records.length} records).`)
+    setStatus(`${L2("Архивът е изтеглен", "Archive downloaded")} (${countWord(state.data.records.length, "запис", "записа", "record", "records")}).`
       + (na.length ? L2(` Без ${na.join(", ")}: няма достъп.`, ` Without ${na.join(", ")}: no access.`) : ""), !!na.length);
   }
 
@@ -461,19 +479,21 @@
     if (!r) return h;
     if (state.orphanNote) h += `<div class="note">${esc(state.orphanNote)}</div>`;
     const hot = (n) => (n ? ` class="n hot"` : ` class="n"`);
-    h += `<h2>${esc(L2("По дефиниции", "By definition"))}</h2><table><tr><th>${esc(L2("Библиотека · дефиниция", "Library · definition"))}</th><th>${esc(L2("Записи", "Records"))}</th>
+    // round 19 L7: the wide tables scroll inside their own box, not the page (375 px)
+    const WRAP = `<div class="hscroll" style="overflow-x:auto;max-width:100%">`;
+    h += `<h2>${esc(L2("По дефиниции", "By definition"))}</h2>${WRAP}<table><tr><th>${esc(L2("Библиотека · дефиниция", "Library · definition"))}</th><th>${esc(L2("Записи", "Records"))}</th>
       <th title="frn:entity:…$…">${esc(L2("Сурови $", "Raw $"))}</th><th title="frn:entity:…%2524…">%2524</th><th>${esc(L2("Тестови", "Test"))}</th><th title="${esc(L2("над 90 % от лимита на историята на инструмента", "over 90 % of the tool's history cap"))}">${esc(L2("Дълги истории", "Long logs"))}</th><th>${esc(L2("Сираци", "Orphans"))}</th><th title="${esc(L2("не са намерени, но може да са в незареден модел или търсенето им се е провалило", "not found, but may be in a model that is not loaded, or their lookup failed"))}">${esc(L2("Неизвестни", "Unknown"))}</th></tr>`;
     for (const x of r.rows) h += x.noAccess ? `<tr class="bad"><td>${esc(x.lib)} · <b>${esc(x.def)}</b></td><td colspan="7">${esc(L2("няма достъп – записите не могат да се прочетат с вашите права", "no access – the records cannot be read with your rights"))}</td></tr>` : `<tr><td>${esc(x.lib)} · <b>${esc(x.def)}</b></td><td class="n">${x.count}</td><td${hot(x.raw)}>${x.raw}</td><td${hot(x.double)}>${x.double || 0}</td><td${hot(x.test)}>${x.test}</td><td${hot(x.longLogs)} title="&gt; ${H.logCap(x.def)}">${x.longLogs}</td><td${hot(x.orphans)}>${x.orphans == null ? "–" : x.orphans}</td><td class="n">${x.unknown == null ? "–" : x.unknown}</td></tr>`;
-    h += `</table>`;
+    h += `</table></div>`;
     for (const kind of KIND_ORDER) {
       const list = r.issues.filter((i) => i.kind === kind);
       if (!list.length) continue;
       h += `<h2>${esc(H.KIND[kind][lang === "bg" ? 0 : 1])} · ${list.length}</h2>`;
       if (kind === "raw") h += `<div class="sub" style="margin-bottom:4px">${esc(L2("Connect и Tekla не показват тези записи. Стомана ги премества с „Премести“; другите панели още не.", "Connect and Tekla never show these records. Steel moves them with \"Премести\"; the other panels do not yet."))}</div>`;
-      h += `<table><tr><th>${esc(L2("Дефиниция", "Definition"))}</th><th>${esc(L2("Такт / марка", "Pour / mark"))}</th><th>${esc(L2("Линк", "Link"))}</th><th>${esc(L2("Подробно", "Detail"))}</th><th></th></tr>`;
+      h += `${WRAP}<table><tr><th>${esc(L2("Дефиниция", "Definition"))}</th><th>${esc(L2("Такт / марка", "Pour / mark"))}</th><th>${esc(L2("Линк", "Link"))}</th><th>${esc(L2("Подробно", "Detail"))}</th><th></th></tr>`;
       for (const [k, i] of list.slice(0, 200).entries()) h += `<tr><td>${esc(i.def)}</td><td>${esc(i.label)}</td><td class="mono">${esc(i.link)}</td><td>${esc(i.detail)}</td>
         <td>${i.guids.length && kind !== "orphan" ? `<button class="small secondary" data-act="showIssue" data-kind="${kind}" data-i="${k}">${esc(L2("Покажи", "Show"))}</button>` : ""}</td></tr>`;
-      h += `</table>${list.length > 200 ? `<div class="sub">${esc(L2(`… и още ${list.length - 200} (всички са в CSV)`, `… and ${list.length - 200} more (all in the CSV)`))}</div>` : ""}`;
+      h += `</table></div>${list.length > 200 ? `<div class="sub">${esc(L2(`… и още ${list.length - 200} (всички са в CSV)`, `… and ${list.length - 200} more (all in the CSV)`))}</div>` : ""}`;
     }
     return h;
   }
@@ -498,9 +518,9 @@
     if (!rows.length) return h + `<div class="note">${esc(L2("Няма промени за периода.", "No changes in this period."))}</div>`;
     h += `<div class="sub">${esc(L2(`${rows.length} промени`, `${rows.length} changes`))}</div><div class="feed">`;
     for (const [k, r] of rows.slice(0, 500).entries()) {
-      h += `<div class="row"><div class="hd"><b>${esc(r.date)} ${esc(r.time)}</b><span>${esc(r.who || "?")}</span><span class="tag">${esc(T(r.tool))}</span>${r.label ? `<span>${esc(r.label)}</span>` : ""}
+      h += `<div class="row"><div class="hd"><b>${esc(I18N ? I18N.fmtDate(r.date, lang) : r.date)} ${esc(r.time)}</b><span>${esc(r.who || "?")}</span><span class="tag">${esc(T(r.tool))}</span>${r.label ? `<span>${esc(r.label)}</span>` : ""}
         ${r.guids.length ? `<button class="small secondary" style="margin-left:auto" data-act="showFeed" data-i="${k}">${esc(L2("Покажи в модела", "Show in model"))}</button>` : ""}</div>
-        <div class="sub">${esc(r.what)}</div></div>`;
+        <div class="sub">${esc(I18N ? I18N.logText(r.what, lang) : r.what)}</div></div>`;
     }
     h += `</div>${rows.length > 500 ? `<div class="sub">${esc(L2("Показани са първите 500.", "The first 500 are shown."))}</div>` : ""}`;
     return h;
@@ -543,30 +563,34 @@
     else if (act === "showFeed") { const r = (state.feedShown || [])[+b.dataset.i]; if (r) guarded(() => selectGuids(r.guids)); }
     else if (act === "backup") run(backup);
   });
-  $("selLang").onchange = (e) => { lang = e.target.value; try { localStorage.setItem("arsten.admin.lang", lang); } catch {} render(); };
+  $("selLang").onchange = (e) => { lang = I18N ? I18N.setLang(e.target.value) : e.target.value; render(); relabelStatus(); };
 
   async function start(api, client, core) {
     state.api = api;
+    if (window.ArstenDiag) ArstenDiag.set({ panel: "Администрация (admin)", lang: () => lang });   // round 19 M1: before the access check, so a denied screen's diagnostics name the panel
     const access = window.ARSTEN_DEMO ? (window.ARSTEN_DEMO_ACCESS || { allowed: true, role: "admin", caps: [] })
       : await ArstenAccess.check({ api, getToken, app: "projectAdmin", config: ACCESS_CONFIG });
+    if (I18N) { lang = await I18N.pickLang(api, access, OLD_LANG); $("selLang").value = lang; }   // stored choice, else the Connect user's language
     if (!access.allowed) { state.api = null; ArstenAccess.renderDenied(document.body, lang, access); return; }
     state.access = access;
     try { const u = await api.user.getUser(); if (u) state.me = { id: u.id, email: u.email, tiduuid: u.tiduuid, name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || "" }; } catch {}
     state.project = (await api.project.getProject()) || {};
+    if (window.ArstenDiag) ArstenDiag.set({ panel: "Администрация (admin)", projectId: state.project.id, redact: [state.me && state.me.name], lang: () => lang });   // A23
     state.client = client || new A.PsetClient({ region: state.project.location || "europe", getToken });
     state.core = core || PH.coreClient(ArstenAccess.coreBase(state.project.location), getToken);
     $("main").hidden = false;
     await run(runSetup);
   }
-  window.AdminApp = { start, state };
+  window.AdminApp = { start, state, _token: { getToken, onToken, waiting: () => waiters.length } };   // _token: tests (round 17 L3)
 
   function onEvent(event, data) { if (event === "extension.accessToken") onToken(data); }
   if (window.parent === window) {
     if (/[?&]demo\b/.test(location.search)) { const s = document.createElement("script"); s.src = "demo.js?t=" + Date.now(); document.body.appendChild(s); }
-    else setStatus("Not inside Trimble Connect. Add this extension to a project and open it from the 3D viewer side panel.", true);
+    else setStatus(I18N ? I18N.word("notInside", lang) : "Not inside Trimble Connect.", true);
     return;
   }
+  if (I18N) setStatus(I18N.word("connecting", lang));
   TrimbleConnectWorkspace.connect(window.parent, onEvent, 30000)
     .then((api) => start(api))
-    .catch((e) => setStatus("Could not connect to Trimble Connect: " + errText(e), true));
+    .catch((e) => setStatus((I18N ? I18N.word("connectFail", lang) : "Could not connect to Trimble Connect") + ": " + errText(e), true));
 })();

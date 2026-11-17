@@ -1,4 +1,4 @@
-# Администрация (Arsten / MULTIPLAN) – Trimble Connect 3D-viewer extension
+# Администрация (Arsten / Multiplan) – Trimble Connect 3D-viewer extension
 
 Admin only. Checks a project against the official template AM_TEMPLATE (groups, property set libraries, definitions,
 library access, folders), reports data health (raw "$" links, test leftovers, long logs, orphans), shows what changed

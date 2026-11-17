@@ -342,7 +342,7 @@
       const c = comparePolicy(lib.policy, snap.projectId, groupIds, spec);
       const ro = reportOnly(snap.projectId, spec.key);
       const near = spec.access.groups.map((r) => r.group).filter((n) => nearGroups[n]);
-      const lv = { edit: ["Edit", "Edit"], read: ["Read", "Read"], none: ["No access", "No access"] };
+      const lv = { edit: ["Edit", "Edit"], read: ["Read", "Read"], none: ["Няма", "No access"] };   // same word as the before/after table (round 14 L6)
       const lines = c.diffs.map((x) => ({ bg: `${x.who === "default" ? "Всички членове" : x.who}${x.def ? " · " + x.def : " · библиотека"}: ${lv[x.have][0]}, трябва ${lv[x.want][0]}`,
         en: `${x.who === "default" ? "All members" : x.who}${x.def ? " · " + x.def : " · library"}: ${lv[x.have][1]}, should be ${lv[x.want][1]}` }));
       for (const u of c.unknown) lines.push(u.why === "deny"
