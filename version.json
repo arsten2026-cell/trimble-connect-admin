@@ -1,23 +1,24 @@
 {
   "panel": "admin",
   "repo": "arsten2026-cell/trimble-connect-admin",
-  "id": "e6f0df4316",
-  "built": "2026-11-16T21:52:13.922Z",
+  "id": "22175c3d00",
+  "built": "2026-11-17T00:22:28.962Z",
   "files": {
-    "app.js": "dd94cc1cc3",
-    "expected.js": "228590722a",
-    "health.js": "634be6fbf7",
-    "psetapi.js": "cb56112323",
-    "arsten-access.js": "c29c3b3f4f",
-    "arsten-backup.js": "28ec966847",
-    "arsten-photos.js": "f0a7981489",
-    "arsten-acceptance.js": "585d7387c0",
-    "status.js": "157dd5a2f6",
-    "stages.js": "e1a886962e",
+    "app.js": "f22e982db8",
+    "arsten-perf.js": "21f7454938",
+    "expected.js": "3feac01b7b",
+    "health.js": "1711b7d15b",
+    "psetapi.js": "3ecda69f18",
+    "arsten-access.js": "b6f528e602",
+    "arsten-backup.js": "6474f7830d",
+    "arsten-photos.js": "0288cfea0d",
+    "arsten-acceptance.js": "3fb82d4a41",
+    "status.js": "900f56b5c0",
+    "stages.js": "55c999f75b",
     "records.js": "f037461491",
     "fabrication.js": "4c88ed8002",
-    "manifest.json": "c56915d474",
+    "manifest.json": "e7c2e1dbfe",
     "icon.svg": "d160a96998",
-    "index.html": "79fc0ed57a"
+    "index.html": "21ce701228"
   }
 }

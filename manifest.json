@@ -1,5 +1,5 @@
 {
-  "title": "Администрация (Arsten)",
+  "title": "Администрация (Arsten / Multiplan)",
   "url": "https://arsten2026-cell.github.io/trimble-connect-admin/index.html",
   "icon": "https://arsten2026-cell.github.io/trimble-connect-admin/icon.svg",
   "description": "Admin only: checks a project against the AM_TEMPLATE setup (groups, property set libraries, definitions, access, folders), reports data health, shows what changed and downloads a JSON archive.",

@@ -2,12 +2,12 @@
 // Runs in the browser (window.ArstenHealth) and in Node tests.
 //
 // History lines, as the tools write them (status.js logLine, records.js / arsten-acceptance.js stamp, fabrication.js patchFor):
-//   "2026-11-14 09:12 done: Formwork 2026-11-14 by Иван Петров – ос 3"         (Pour status)
-//   "2026-11-14 09:12 set: erected 2026-11-14 by Иван Петров"                   (Steel asmstatus / asmhold)
-//   "2026-11-14 09:12 created by Иван Петров (typed): RF22=3"                   (Steel delivery)
-//   "2026-11-14 09:12 round 1: approved by Dian Stoyanov – ok"                  (Acceptance decision)
+//   "2026-11-14 09:12 done: Formwork 2026-11-14 by Име Фамилия – ос 3"         (Pour status)
+//   "2026-11-14 09:12 set: erected 2026-11-14 by Име Фамилия"                   (Steel asmstatus / asmhold)
+//   "2026-11-14 09:12 created by Име Фамилия (typed): RF22=3"                   (Steel delivery)
+//   "2026-11-14 09:12 round 1: approved by Име Фамилия – ok"                  (Acceptance decision)
 //   "2026-11-14 09:12 FabDate=2026-11-01, DelivDate=2026-11-05 (fab.xlsx, Иван)" (AM_Fabrication: "(source, by)")
-//   "2026-11-14 09:12 note: Formwork – текст by Иван Петров"                    (Pour status note: the note BEFORE "by")
+//   "2026-11-14 09:12 note: Formwork – текст by Име Фамилия"                    (Pour status note: the note BEFORE "by")
 //   "2026-11-14 09:12 inherited: Formwork 2026-11-10 (A) from G – pour break, by Иван" (Pour status split)
 // A note can hold " by " and can span several lines (continuation lines have no time stamp).
 (function (root, factory) {
@@ -192,9 +192,11 @@
    * @param check what the model check found: null when no model is loaded (orphans not checked); a Set of the IFC GUIDs
    *   found; or {present: Set, unknown: Set}, unknown = GUIDs not found that cannot be called orphans (their lookup
    *   failed, or some project models are not loaded). Those count as "unknown", never as orphans (round 9, M11).
-   * @returns {rows:[{lib, def, count, raw, double, test, longLogs, orphans|null, unknown|null}], issues:[{lib, def, kind, link, label, detail, guids}]}
+   * @param noAccess optional Set (or array) of "lib|def" whose records could not be read (403, round 11 L9): their rows
+   *   carry noAccess: true and say "няма достъп" instead of counts.
+   * @returns {rows:[{lib, def, count, raw, double, test, longLogs, orphans|null, unknown|null, noAccess?}], issues:[{lib, def, kind, link, label, detail, guids}]}
    */
-  function health(records, check, defsByLib) {
+  function health(records, check, defsByLib, noAccess) {
     const present = check instanceof Set ? check : check && check.present ? check.present : null;
     const unknownSet = (check && !(check instanceof Set) && check.unknown) || new Set();
     const rows = new Map(), issues = [];
@@ -218,6 +220,11 @@
         else { row.orphans++; issue("orphan", g); }
       }
     }
+    for (const k of noAccess || []) {
+      const i = k.indexOf("|"), lib = k.slice(0, i), def = k.slice(i + 1);
+      if (!rows.has(k)) rows.set(k, blank(lib, def));
+      Object.assign(rows.get(k), { noAccess: true, orphans: null, unknown: null });
+    }
     return { rows: [...rows.values()], issues };
   }
 
@@ -235,7 +242,9 @@
     const lines = [];
     lines.push([en ? "Library" : "Библиотека", en ? "Definition" : "Дефиниция", en ? "Records" : "Записи", en ? "Raw $ links" : "Сурови $", "%2524", en ? "Test" : "Тестови", en ? "Long logs" : "Дълги истории", en ? "Orphans" : "Сираци", en ? "Unknown" : "Неизвестни"].map(cell).join(";"));
     const nc = en ? "not checked" : "непроверено";
-    for (const r of report.rows) lines.push([r.lib, r.def, r.count, r.raw, r.double || 0, r.test, r.longLogs, r.orphans == null ? nc : r.orphans, r.unknown == null ? nc : r.unknown].map(cell).join(";"));
+    const na = en ? "no access" : "няма достъп";
+    for (const r of report.rows) if (r.noAccess) lines.push([r.lib, r.def, na, na, na, na, na, na, na].map(cell).join(";"));
+    else lines.push([r.lib, r.def, r.count, r.raw, r.double || 0, r.test, r.longLogs, r.orphans == null ? nc : r.orphans, r.unknown == null ? nc : r.unknown].map(cell).join(";"));
     lines.push("");
     lines.push([en ? "Library" : "Библиотека", en ? "Definition" : "Дефиниция", en ? "Problem" : "Проблем", en ? "Link" : "Линк", en ? "Pour / mark" : "Такт / марка", en ? "Detail" : "Подробно"].map(cell).join(";"));
     for (const i of report.issues) lines.push([i.lib, i.def, KIND[i.kind] ? KIND[i.kind][en ? 1 : 0] : i.kind, i.link, i.label, i.detail].map(cell).join(";"));
@@ -247,7 +256,8 @@
     return {
       kind: "arsten-connect-archive", version: 1, created: meta && meta.created, project: meta && meta.project,
       libraries: (libraries || []).map((l) => ({ id: l.id, name: l.name, policy: l.policy || null,
-        definitions: (l.definitions || []).map((d) => ({ id: d.id, definition: d.definition || null, records: (d.records || []).map((r) => ({ link: r.link, props: r.props })) })) })),
+        definitions: (l.definitions || []).map((d) => Object.assign({ id: d.id, definition: d.definition || null, records: (d.records || []).map((r) => ({ link: r.link, props: r.props })) },
+          d.noAccess ? { noAccess: true } : {})) })),
     };
   }
 

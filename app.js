@@ -2,6 +2,9 @@
 //   1. Настройка на проекта – checklist against AM_TEMPLATE (expected.js): groups, libraries, definitions, library
 //      access, folders, duplicate libraries, project admins outside 00_ADMIN. "Създай липсващите" creates missing groups,
 //      folders and definitions; a library's access is rewritten only after an inline confirm. Nothing is ever deleted.
+//      Round 11 M7: group, access and definition fixes only for a Connect project ADMIN (own role from projects/{id}/users);
+//      a 00_ADMIN member with the USER role sees the report, folder creation and the reason.
+//      Round 11 L9: a library / definition that cannot be read is reported as "няма достъп"; the rest is still checked.
 //      Libraries themselves are NOT created (not verified through the API): the panel gives the steps.
 //   2. Здраве на данните – read-only report per library / definition (health.js), CSV export.
 //   3. Какво се промени – change feed from the records' history logs (7 / 30 days), JSON archive of both libraries.
@@ -25,7 +28,17 @@
   const setStatus = (t, bad) => { $("status").textContent = t || ""; $("status").className = "status" + (bad ? " bad" : ""); };
   const errText = (e) => (e && (e.message || e.toString())) || String(e);
   const guarded = (fn) => Promise.resolve().then(fn).catch((e) => { console.error(e); setStatus(errText(e), true); }).finally(() => { state.busy = false; render(); });
-  const isAdmin = () => !!(state.access && state.access.role === "admin");
+  // role checks work with the single role (access.role) and with the role union of multi-group users (access.roles)
+  const hasRole = (r) => !!(state.access && (state.access.role === r || (Array.isArray(state.access.roles) && state.access.roles.includes(r))));
+  const isAdmin = () => hasRole("admin");
+  /** M7 (round 11): the user's own Connect project role is ADMIN (projects/{id}/users, read by the setup check).
+   *  Only then are group, policy and definition fixes offered: Connect refuses them for a 00_ADMIN member with role USER. */
+  const isConnectAdmin = () => !!(state.me && state.snap && (state.snap.projectAdmins || []).some((u) => sameUser(u, state.me)));
+  const canManage = () => isAdmin() && isConnectAdmin();
+  /** The fixes "Създай липсващите" may run: folders for every admin, groups and definitions only for a Connect project ADMIN. */
+  const allowedFixes = () => (state.setup ? E.plannedFixes(state.setup.items).filter((f) => canManage() || f.kind === "folder") : []);
+  const NEEDS_CONNECT_ADMIN = { bg: "Нужна е роля администратор на проекта в Connect за групи, права и дефиниции (Connect отказва тези промени на член на 00_ADMIN с роля потребител). Проверките и докладите остават.",
+    en: "Groups, access and definitions need the Connect project ADMIN role (Connect refuses them for a 00_ADMIN member with the USER role). The checks and reports stay." };
 
   // ---------- access token ----------
   let token = null, waiters = [];
@@ -111,8 +124,8 @@
 
   async function createMissing() {
     if (!isAdmin()) return setStatus(L2("Само за администратори.", "Admins only."), true);
-    const fixes = E.plannedFixes(state.setup.items);
-    if (!fixes.length) return;
+    const fixes = allowedFixes();   // M7: groups and definitions only for a Connect project ADMIN
+    if (!fixes.length) return setStatus(canManage() ? "" : T(NEEDS_CONNECT_ADMIN), !canManage());
     const log = (ok, bg, en) => state.fixLog.push({ ok, bg, en });
     const pid = state.project.id, B = bodies();
     for (const f of fixes.filter((x) => x.kind === "group")) {
@@ -137,7 +150,7 @@
     for (const f of fixes.filter((x) => x.kind === "def")) {
       const lib = state.setup.libs[f.lib], spec = E.LIBRARIES.find((l) => l.key === f.lib), d = spec.defs.find((x) => x.id === f.def);
       try {
-        const r = await state.client.ensureDefinition(lib.id, B[d.body]);
+        const r = await state.client.ensureDefinition(lib.id, B[d.body], { fresh: true });   // never answered from the session cache (review 10 L3)
         log(true, `${lib.name} · ${f.def}: ${r.created ? "създадена" : "допълнени полета " + (r.extended || []).join(", ")}`, `${lib.name} · ${f.def}: ${r.created ? "created" : "fields added " + (r.extended || []).join(", ")}`);
       } catch (e) { log(false, `${lib.name} · ${f.def}: ${errText(e)}`, `${lib.name} · ${f.def}: ${errText(e)}`); }
     }
@@ -156,6 +169,7 @@
   function refusals(key, prep) {
     const out = [];
     const item = state.setup.items.find((i) => i.id === "acc:" + key) || {};
+    if (!isConnectAdmin()) out.push(NEEDS_CONNECT_ADMIN);   // M7 (round 11): PUT libs/{id}/policy is project-admin only
     if (E.reportOnly(state.project.id, key)) out.push({ bg: "Проектът е в списъка „само доклад“ (expected.js REPORT_ONLY): правата му са различни по избор.", en: "The project is on the report-only list (expected.js REPORT_ONLY): its access differs on purpose." });
     if (item.blockedBy === "groups") out.push({ bg: "Първо създайте липсващите групи.", en: "Create the missing groups first." });
     if (item.blockedBy === "near") out.push({ bg: "Има групи с подобни имена – първо ги оправете (едната група трябва да остане).", en: "There are groups with similar names – resolve them first (one group must remain)." });
@@ -244,23 +258,33 @@
   // ---------- data (tabs 2 and 3) ----------
   async function loadData() {
     if (!state.setup) await runSetup();
-    const recs = [], libs = [];
+    const recs = [], libs = [], noAccess = [], errors = [];
     for (const spec of E.LIBRARIES) {
       const lib = state.setup.libs[spec.key];
       if (!lib) continue;
       const entry = { id: lib.id, name: lib.name, key: spec.key, policy: lib.policy, definitions: [] };
       for (const d of spec.defs) {
         setStatus(L2(`Чета ${lib.name} · ${d.id}…`, `Reading ${lib.name} · ${d.id}…`));
-        let m = new Map();
-        try { m = await state.client.listAll(lib.id, d.id); } catch (e) { if (e.status !== 404) throw e; }
+        let m = new Map(), denied = false;
+        // L9 (round 11): a refused (403) or failing read is reported as "няма достъп" for that definition; the others go on
+        try { m = await state.client.listAll(lib.id, d.id); }
+        catch (e) {
+          if (e.status !== 404) {
+            denied = true; noAccess.push(lib.name + "|" + d.id);
+            if (e.status !== 403 && e.status !== 401) errors.push(`${lib.name} · ${d.id}: ${errText(e)}`);
+            console.warn("not readable", lib.name, d.id, e);
+          }
+        }
         const records = [...m].map(([link, props]) => ({ lib: lib.name, def: d.id, link, props }));
         recs.push(...records);
-        entry.definitions.push({ id: d.id, definition: ((state.snap.defs || {})[spec.key] || {})[d.id] || null, records });
+        entry.definitions.push(Object.assign({ id: d.id, definition: ((state.snap.defs || {})[spec.key] || {})[d.id] || null, records }, denied ? { noAccess: true } : {}));
       }
       libs.push(entry);
     }
-    state.data = { records: recs, libs, at: new Date() };
-    setStatus(L2(`${recs.length} записа в ${libs.length} библиотеки`, `${recs.length} records in ${libs.length} libraries`));
+    state.data = { records: recs, libs, at: new Date(), noAccess, errors };
+    const deniedLibs = [...new Set(noAccess.map((k) => k.split("|")[0]))];
+    setStatus(L2(`${recs.length} записа в ${libs.length} библиотеки`, `${recs.length} records in ${libs.length} libraries`)
+      + (deniedLibs.length ? L2(` · няма достъп: ${deniedLibs.join(", ")}`, ` · no access: ${deniedLibs.join(", ")}`) : ""), !!deniedLibs.length);
   }
 
   /** Runtime ids of a chunk of GUIDs; a failing call is split and retried smaller, down to one GUID at a time (as
@@ -327,9 +351,11 @@
     const check = await modelCheck(guids);
     state.orphanNote = orphanNoteOf(check);
     const defsByLib = Object.fromEntries(state.data.libs.map((l) => [l.name, l.definitions.map((d) => d.id)]));
-    state.report = H.health(state.data.records, check, defsByLib);
+    state.report = H.health(state.data.records, check, defsByLib, state.data.noAccess);
     const n = state.report.issues.length;
-    setStatus(n ? L2(`${n} забележки`, `${n} findings`) : L2("Няма забележки.", "No findings."), false);
+    const denied = [...new Set((state.data.noAccess || []).map((k) => k.split("|")[0]))];
+    setStatus((n ? L2(`${n} забележки`, `${n} findings`) : L2("Няма забележки.", "No findings."))
+      + (denied.length ? L2(` · няма достъп до ${denied.join(", ")} (не е проверено)`, ` · no access to ${denied.join(", ")} (not checked)`) : ""), !!denied.length);
   }
 
   async function selectGuids(guids) {
@@ -357,7 +383,9 @@
     if (!state.data) await loadData();
     const a = H.archive({ created: new Date().toISOString(), project: { id: state.project.id, name: state.project.name || "" } }, state.data.libs);
     download(`arsten-archive_${fileStem()}.json`, JSON.stringify(a, null, 1), "application/json");
-    setStatus(L2(`Архивът е изтеглен (${state.data.records.length} записа).`, `Archive downloaded (${state.data.records.length} records).`));
+    const na = state.data.noAccess || [];
+    setStatus(L2(`Архивът е изтеглен (${state.data.records.length} записа).`, `Archive downloaded (${state.data.records.length} records).`)
+      + (na.length ? L2(` Без ${na.join(", ")}: няма достъп.`, ` Without ${na.join(", ")}: no access.`) : ""), !!na.length);
   }
 
   // ---------- render ----------
@@ -368,10 +396,12 @@
   function renderSetup() {
     const r = state.setup;
     if (!r) return `<div class="note">${esc(L2("Проверката не е пусната.", "Not checked yet."))}</div>`;
-    const fixes = E.plannedFixes(r.items);
+    const fixes = allowedFixes();
     let h = `<div class="bar"><button class="small secondary" data-act="setup" ${state.busy ? "disabled" : ""}>${esc(L2("Провери отново", "Check again"))}</button>`;
-    if (isAdmin()) h += `<button class="small" data-act="create" ${state.busy || !fixes.length ? "disabled" : ""}>${esc(L2("Създай липсващите", "Create missing"))}${fixes.length ? ` (${fixes.length})` : ""}</button>`;
-    h += `</div><div class="sub">${esc(L2("Създава липсващи групи, папки и дефиниции. Нищо не се трие. Библиотеки не се създават автоматично.", "Creates missing groups, folders and definitions. Nothing is deleted. Libraries are not created automatically."))}</div>`;
+    if (isAdmin()) h += `<button class="small" data-act="create" ${state.busy || !fixes.length ? "disabled" : ""}>${esc(canManage() ? L2("Създай липсващите", "Create missing") : L2("Създай липсващите папки", "Create missing folders"))}${fixes.length ? ` (${fixes.length})` : ""}</button>`;
+    h += `</div><div class="sub">${esc(canManage() ? L2("Създава липсващи групи, папки и дефиниции. Нищо не се трие. Библиотеки не се създават автоматично.", "Creates missing groups, folders and definitions. Nothing is deleted. Libraries are not created automatically.")
+      : L2("Създава само липсващи папки. Нищо не се трие.", "Creates missing folders only. Nothing is deleted."))}</div>`;
+    if (isAdmin() && !canManage()) h += `<div class="note bad" id="needsConnectAdmin">${esc(T(NEEDS_CONNECT_ADMIN))}${state.me ? "" : esc(L2(" (Текущият потребител не можа да се разпознае.)", " (The current user could not be identified.)"))}</div>`;
     if (state.fixLog.length) h += `<div class="note">${state.fixLog.map((x) => `<div class="${x.ok ? "" : "bad"}">${x.ok ? "✓" : "✗"} ${esc(T(x))}</div>`).join("")}</div>`;
     for (const [sec, bg, en] of SECTIONS) {
       const list = r.items.filter((i) => i.section === sec);
@@ -382,7 +412,7 @@
         h += `<div class="item ${i.state}"><span class="dot"></span><div class="body"><div>${esc(T(i))}${i.detail ? ` <span class="sub">– ${esc(T(i.detail))}</span>` : ""}</div>`;
         if (i.lines && i.lines.length) h += `<div class="lines">${i.lines.map((l) => `<div>${esc(T(l))}</div>`).join("")}</div>`;
         if (i.fix && i.fix.kind === "library") h += `<ol class="help">${E.libraryHelp(i.fix.name, state.project.id, lang).slice(1).map((l) => `<li>${esc(l.replace(/^\d+\.\s*/, ""))}</li>`).join("")}</ol><div class="sub">${esc(E.libraryHelp(i.fix.name, state.project.id, lang)[0])}</div>`;
-        if (i.fix && i.fix.kind === "policy" && isAdmin()) {
+        if (i.fix && i.fix.kind === "policy" && canManage()) {
           const key = i.fix.lib;
           if (state.confirm && state.confirm.key === key) h += renderConfirm(state.confirm);
           else h += `<div class="bar"><button class="small" data-act="policyAsk" data-lib="${esc(key)}" ${state.busy ? "disabled" : ""}>${esc(L2("Пренапиши правата", "Rewrite access"))}</button></div>`;
@@ -433,7 +463,7 @@
     const hot = (n) => (n ? ` class="n hot"` : ` class="n"`);
     h += `<h2>${esc(L2("По дефиниции", "By definition"))}</h2><table><tr><th>${esc(L2("Библиотека · дефиниция", "Library · definition"))}</th><th>${esc(L2("Записи", "Records"))}</th>
       <th title="frn:entity:…$…">${esc(L2("Сурови $", "Raw $"))}</th><th title="frn:entity:…%2524…">%2524</th><th>${esc(L2("Тестови", "Test"))}</th><th title="${esc(L2("над 90 % от лимита на историята на инструмента", "over 90 % of the tool's history cap"))}">${esc(L2("Дълги истории", "Long logs"))}</th><th>${esc(L2("Сираци", "Orphans"))}</th><th title="${esc(L2("не са намерени, но може да са в незареден модел или търсенето им се е провалило", "not found, but may be in a model that is not loaded, or their lookup failed"))}">${esc(L2("Неизвестни", "Unknown"))}</th></tr>`;
-    for (const x of r.rows) h += `<tr><td>${esc(x.lib)} · <b>${esc(x.def)}</b></td><td class="n">${x.count}</td><td${hot(x.raw)}>${x.raw}</td><td${hot(x.double)}>${x.double || 0}</td><td${hot(x.test)}>${x.test}</td><td${hot(x.longLogs)} title="&gt; ${H.logCap(x.def)}">${x.longLogs}</td><td${hot(x.orphans)}>${x.orphans == null ? "–" : x.orphans}</td><td class="n">${x.unknown == null ? "–" : x.unknown}</td></tr>`;
+    for (const x of r.rows) h += x.noAccess ? `<tr class="bad"><td>${esc(x.lib)} · <b>${esc(x.def)}</b></td><td colspan="7">${esc(L2("няма достъп – записите не могат да се прочетат с вашите права", "no access – the records cannot be read with your rights"))}</td></tr>` : `<tr><td>${esc(x.lib)} · <b>${esc(x.def)}</b></td><td class="n">${x.count}</td><td${hot(x.raw)}>${x.raw}</td><td${hot(x.double)}>${x.double || 0}</td><td${hot(x.test)}>${x.test}</td><td${hot(x.longLogs)} title="&gt; ${H.logCap(x.def)}">${x.longLogs}</td><td${hot(x.orphans)}>${x.orphans == null ? "–" : x.orphans}</td><td class="n">${x.unknown == null ? "–" : x.unknown}</td></tr>`;
     h += `</table>`;
     for (const kind of KIND_ORDER) {
       const list = r.issues.filter((i) => i.kind === kind);

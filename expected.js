@@ -72,14 +72,14 @@
   // "различно по избор") and never offers "Пренапиши правата" for the listed libraries. Add a row per project.
   //   projectId: Connect project id; name: for people; libs: LIBRARIES keys; why: shown next to the differences.
   const REPORT_ONLY = [
-    { projectId: "ZDLr1OnpvtE", name: "1028 - Retail Tsarevo", libs: ["steel"],
+    { projectId: "ZDLr1OnpvtE", name: "1028", libs: ["steel"],
       why: { bg: "1028 има свои правила в STEEL (AM_TEMPLATE.md: 1028 не се променя)", en: "1028 keeps its own STEEL rules (AM_TEMPLATE.md: 1028 is not changed)" } },
   ];
   /** The REPORT_ONLY row for a project's library, or null. */
   const reportOnly = (projectId, libKey) => REPORT_ONLY.find((r) => r.projectId === projectId && r.libs.includes(libKey)) || null;
 
   const FOLDERS = [
-    "_ArstenDocs/Photos", "_ArstenDocs/Fabrication", "_ArstenDocs/Submittals", "_ArstenDocs/Transmittals", "_ArstenDocs/Backups",
+    "_ArstenDocs/Photos", "_ArstenDocs/Fabrication", "_ArstenDocs/Submittals", "_ArstenDocs/Transmittals", "_ArstenDocs/Backups", "_ArstenDocs/Client",
     "01_BIM",
     "03_DESIGN/03_TECHNICAL LIVE MODELS", "03_DESIGN/04_STRUCTURAL DESIGN EXPORT MODELS",
     "04_EXECUTION/00_MODELS", "04_EXECUTION/01_ЗА СТАНЦИЯ", "04_EXECUTION/20_FORMWORK PLANS",
