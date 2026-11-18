@@ -75,7 +75,7 @@
   //   projectId: Connect project id; name: for people; libs: LIBRARIES keys; why: shown next to the differences.
   const REPORT_ONLY = [
     { projectId: "ZDLr1OnpvtE", name: "1028", libs: ["steel"],
-      why: { bg: "1028 има свои правила в STEEL (AM_TEMPLATE.md: 1028 не се променя)", en: "1028 keeps its own STEEL rules (AM_TEMPLATE.md: 1028 is not changed)" } },
+      why: { bg: "1028 има свои правила в STEEL и не се променя", en: "1028 keeps its own STEEL rules and is not changed" } },
   ];
   /** The REPORT_ONLY row for a project's library, or null. */
   const reportOnly = (projectId, libKey) => REPORT_ONLY.find((r) => r.projectId === projectId && r.libs.includes(libKey)) || null;
@@ -89,6 +89,75 @@
     "04_EXECUTION/30_REINFORCEMENT PLANS/LATEST DRAWINGS", "04_EXECUTION/30_REINFORCEMENT PLANS/ORDERS",
     "Point clouds", "ЗА СТРОИТЕЛСТВО",
   ];
+
+  // Folder rights (sweep 18.11.2026): the client (01.CLIENT) must not open the tools' internals in Connect's Files
+  // (activities.json with internal entries, all photos, Backups snapshots with STEEL records). Read only: the panel
+  // never changes folder rights; the owner sets them by hand (AM_TEMPLATE.md, "Recommended folder rights").
+  const CLIENT_GROUP = "01.CLIENT";
+  const RIGHTS_FOLDERS = [DOCS, DOCS + "/Activities", DOCS + "/Photos", DOCS + "/Backups"];
+  const RIGHTS_HELP = [
+    // sweep 18.11.2026: said in the panel, not as a pointer to AM_TEMPLATE.md / LIVE-CHECKS.md - those live in the
+    // developer repo, a Connect project admin cannot open them
+    { bg: "Препоръчани права на папките (задават се ръчно в Connect → Файлове → папка → Права):", en: "Recommended folder rights (set by hand in Connect → Files → folder → Access):" },
+    { bg: `${DOCS}: четене и запис 00_ADMIN, 02, 02.1 – без 01.CLIENT и без „всички членове“`, en: `${DOCS}: read and write 00_ADMIN, 02, 02.1 – not 01.CLIENT, not "all members"` },
+    { bg: `${DOCS}/Client: четене и за 01.CLIENT`, en: `${DOCS}/Client: read also for 01.CLIENT` },
+    { bg: `${DOCS}/Fabrication: и 06.FABRICATOR`, en: `${DOCS}/Fabrication: also 06.FABRICATOR` },
+    { bg: "Проверете като влезете с клиентски акаунт.", en: "Check by signing in with a client account." },
+  ];
+  const listOf = (raw) => (Array.isArray(raw) ? raw : raw && typeof raw === "object"
+    ? [raw.permissions, raw.items, raw.data, raw.entries, raw.acl].find((x) => Array.isArray(x)) || null : null);
+  const strOf = (...xs) => { for (const x of xs) if (x != null && typeof x !== "object" && String(x).trim()) return String(x).trim(); return ""; };
+  /** The entries of a GET folders/{id}/permissions answer, [{id, type, name, level}], or null when the shape is unknown
+   *  (the live API's shape is not verified: several field names are accepted, anything else is "not checked"). */
+  function permEntries(raw) {
+    const list = listOf(raw);
+    if (!list) return null;
+    return list.filter((e) => e && typeof e === "object").map((e) => {
+      const who = [e.principal, e.group, e.user].find((x) => x && typeof x === "object") || {};
+      return { id: strOf(e.id, e.principalId, e.groupId, e.userId, who.id), type: strOf(e.type, e.principalType, e.kind, who.type).toUpperCase(),
+        name: strOf(e.name, e.groupName, e.principalName, who.name), level: strOf(e.permission, e.access, e.accessLevel, e.level, e.role, e.rights, e.right).toUpperCase() };
+    });
+  }
+  const canReadLevel = (lv) => !!lv && !/NONE|NO_?ACCESS|DENY|DENIED|HIDDEN|BLOCK/.test(lv);
+  const EVERYONE_TYPES = ["PROJECT", "EVERYONE", "ALL", "ALL_MEMBERS", "DEFAULT", "MEMBERS"];
+  /** Who of {client, everyone} can read with these own entries of a folder. */
+  function readersOf(entries, clientGroupId, projectId) {
+    const everyone = entries.some((e) => canReadLevel(e.level) && (EVERYONE_TYPES.includes(e.type) || (projectId && e.id === projectId) || /^(everyone|all members|всички)/i.test(e.name)));
+    const client = entries.some((e) => canReadLevel(e.level) && ((clientGroupId && e.id === clientGroupId) || e.name === CLIENT_GROUP));
+    return { everyone, client };
+  }
+  /**
+   * Folder-rights rows (pure). rights: {path: {id, raw} | {id, error} | {missing: true}} for RIGHTS_FOLDERS, or null
+   * when they were not read. A folder without own entries inherits its parent (_AM_Docs inherits the project root,
+   * which every member reads). Red when the client or every member can read a folder; one permanent yellow row when
+   * no folder's rights could be read. No fix: the panel never changes rights.
+   */
+  function evaluateRights(rights, clientGroupId, projectId) {
+    const out = [];
+    const row = (path, state, detail, extra) => out.push(Object.assign({ section: "rights", id: "rights:" + path, state, bg: "/" + path, en: "/" + path, detail, fix: null }, extra || {}));
+    const notChecked = (why) => out.push({ section: "rights", id: "rights:check", state: "warn", bg: "Не е проверено: проверете правата на клиента в папките", en: "Not checked: verify the client folder rights",
+      detail: { bg: "Правата на папките не се четат.", en: "The folder rights cannot be read." }, lines: RIGHTS_HELP, fix: null, why });
+    if (!rights) { notChecked(""); return out; }
+    if (!rights[DOCS] || rights[DOCS].missing) { notChecked(`${DOCS} ?`); return out; }
+    const eff = {};
+    let read = 0;
+    for (const path of RIGHTS_FOLDERS) {
+      const r = rights[path];
+      if (!r || r.missing) continue;
+      const entries = r.error ? null : permEntries(r.raw);
+      if (!entries) { eff[path] = { known: false }; row(path, "warn", { bg: "не е проверено – правата не се четат", en: "not checked – the rights cannot be read" }, { why: r.error || "unknown answer" }); continue; }
+      read++;
+      const parent = path === DOCS ? { known: true, everyone: true, client: true } : eff[DOCS] || { known: false };
+      const e = eff[path] = entries.length ? Object.assign({ known: true }, readersOf(entries, clientGroupId, projectId)) : Object.assign({}, parent);
+      if (!e.known) row(path, "warn", { bg: "не е проверено (наследява права, които не се прочетоха)", en: "not checked (inherits rights that could not be read)" });
+      else if (e.everyone || e.client) row(path, "bad", e.everyone
+        ? { bg: "всички членове (и клиентът) могат да я отворят във Files" + (entries.length ? "" : " – папката няма свои права"), en: "every member (the client too) can open it in Files" + (entries.length ? "" : " – the folder has no rights of its own") }
+        : { bg: `${CLIENT_GROUP} може да я отвори във Files`, en: `${CLIENT_GROUP} can open it in Files` }, { lines: RIGHTS_HELP });
+      else row(path, "ok", { bg: "клиентът няма достъп", en: "the client has no access" });
+    }
+    if (!read) { out.length = 0; notChecked(Object.values(rights).map((r) => r && r.error).filter(Boolean)[0] || ""); }
+    return out;
+  }
 
   const ACTIONS = {
     edit: ["pset:Get*", "pset:List*", "pset:PutPSet", "pset:Subscribe"],
@@ -286,7 +355,7 @@
   /**
    * Checklist of the project's setup (pure).
    * @param snap {projectId, groups:[{id,name}], libraries:[{id,name,policy (GET libs/{id}/policy; null = unreadable), policyError?}], defs:{libKey:{defId: def|null}},
-   *              folders:{path: id|null}, projectAdmins:[{id,email,name}], adminGroupMembers:[{id,email}]}
+   *              folders:{path: id|null}, foldersUnsure?:{path: true}, rights?:(evaluateRights), projectAdmins:[{id,email,name}], adminGroupMembers:[{id,email}]}
    * @param bodies definitionBodies(...)
    * @returns {items:[{section, id, state:"ok"|"bad"|"warn"|"unknown", bg, en, detail?, fix?}], groupIds, libs:{key: lib|null}}
    */
@@ -376,14 +445,19 @@
       en: `rename it to ${DOCS} in Connect (Rename keeps files and links); until then the tools use the old one` } });
     for (const path of FOLDERS) {
       const ok = !!(snap.folders || {})[path];
-      add("folders", "folder:" + path, ok ? "ok" : "bad", "/" + path, "/" + path, ok ? {} : { detail: { bg: "липсва", en: "missing" }, fix: { kind: "folder", path } });
+      // sweep 18.11.2026: a name not found in a listing that may be cut off (more pages than could be read) is "not
+      // sure", never "missing": "create missing" would make a second folder of the same name or fail with 409
+      if (!ok && (snap.foldersUnsure || {})[path]) add("folders", "folder:" + path, "unknown", "/" + path, "/" + path, { fix: null,
+        detail: { bg: "не съм сигурен – списъкът на папката е непълен; проверете в Connect", en: "not sure – the folder listing is incomplete; check in Connect" } });
+      else add("folders", "folder:" + path, ok ? "ok" : "bad", "/" + path, "/" + path, ok ? {} : { detail: { bg: "липсва", en: "missing" }, fix: { kind: "folder", path } });
     }
+    for (const r of evaluateRights(snap.rights, groupIds[CLIENT_GROUP], snap.projectId)) items.push(r);
 
     const inAdmin = (u) => (snap.adminGroupMembers || []).some((m) => (m.id && u.id && m.id === u.id) || (m.email && u.email && m.email.toLowerCase() === u.email.toLowerCase()));
     const outside = (snap.projectAdmins || []).filter((u) => !inAdmin(u));
     add("people", "admins", outside.length ? "warn" : "ok", "Администратори на проекта в 00_ADMIN", "Project admins in 00_ADMIN", outside.length ? {
-      detail: { bg: `не са в 00_ADMIN: ${outside.map((u) => u.name || u.email).join(", ")} – получават 403 при запис (заключените библиотеки)`,
-        en: `not in 00_ADMIN: ${outside.map((u) => u.name || u.email).join(", ")} – they get 403 on writes (library lock)` } } : {});
+      detail: { bg: `не са в 00_ADMIN: ${outside.map((u) => u.name || u.email).join(", ")} – не могат да записват статуси`,
+        en: `not in 00_ADMIN: ${outside.map((u) => u.name || u.email).join(", ")} – cannot save statuses` } } : {});
     return { items, groupIds, libs };
   }
 
@@ -411,5 +485,5 @@
   }
 
   return { DOCS, DOCS_OLD, GROUPS, ADMIN_GROUP, LIBRARIES, REPORT_ONLY, reportOnly, groupKeyOf, FOLDERS, ACTIONS, PROJADM_ACTIONS, definitionBodies, buildPolicy, effectiveAccess, comparePolicy,
-    samePolicy, policyChange, levelOf, covers, evaluateSetup, plannedFixes, folderSteps, libraryHelp };
+    samePolicy, policyChange, levelOf, covers, evaluateSetup, plannedFixes, folderSteps, libraryHelp, CLIENT_GROUP, RIGHTS_FOLDERS, permEntries, evaluateRights };
 });

@@ -6,6 +6,8 @@
 //      a 00_ADMIN member with the USER role sees the report, folder creation and the reason.
 //      Round 11 L9: a library / definition that cannot be read is reported as "няма достъп"; the rest is still checked.
 //      Libraries themselves are NOT created (not verified through the API): the panel gives the steps.
+//      Sweep 18.11.2026: folder listings read every page; "Права в папките" reads (never changes) the Core folder rights of
+//      _AM_Docs, Activities, Photos, Backups: red when 01.CLIENT or every member can open them, yellow when not readable.
 //   2. Здраве на данните – read-only report per library / definition (health.js), CSV export.
 //   3. Какво се промени – change feed from the records' history logs (7 / 30 days), JSON archive of both libraries.
 // Access: ArstenAccess app "projectAdmin" (roles ["admin"]), passed as a config override; shared/arsten-access.js unchanged.
@@ -34,7 +36,9 @@
   const setStatus = (t, bad) => { statusAgain = typeof t === "function" ? { t, bad } : null; if (typeof t === "function") t = t(); $("status").textContent = t || ""; $("status").className = "status" + (bad ? " bad" : ""); };
   const relabelStatus = () => { if (statusAgain) setStatus(statusAgain.t, statusAgain.bad); if (window.ArstenDiag && ArstenDiag.relabel) ArstenDiag.relabel(); };
   const errText = (e) => (e && (e.message || e.toString())) || String(e);
-  const guarded = (fn) => Promise.resolve().then(fn).catch((e) => { console.error(e); setStatus(I18N ? I18N.err(errText(e), lang) : errText(e), true); }).finally(() => { state.busy = false; render(); });
+  // Only run() (ownsBusy) clears the busy flag (sweep 18.11.2026): "Покажи" (selectGuids) during a running setup check or
+  // create used to clear it, so a second "Създай липсващите" or policy rewrite could run at the same time as the first.
+  const guarded = (fn, ownsBusy) => Promise.resolve().then(fn).catch((e) => { console.error(e); setStatus(I18N ? I18N.err(errText(e), lang) : errText(e), true); }).finally(() => { if (ownsBusy) state.busy = false; render(); });
   // role checks work with the single role (access.role) and with the role union of multi-group users (access.roles)
   const hasRole = (r) => !!(state.access && (state.access.role === r || (Array.isArray(state.access.roles) && state.access.roles.includes(r))));
   const isAdmin = () => hasRole("admin");
@@ -74,63 +78,106 @@
   // folder names are matched case-insensitively (round 9, low 16): "_arstendocs" is the same folder for people
   const folderName = (s) => String(s == null ? "" : s).normalize("NFC").trim().toLowerCase();
   const findFolder = (list, name) => list.find((x) => String(x.type || "FOLDER").toUpperCase() === "FOLDER" && folderName(x.name) === folderName(name));
-  /** {leaves: {path: id|null} for E.FOLDERS, ids: {path or parent path: id}} */
+  // Every page of a folder listing (sweep 18.11.2026): one plain GET read only the first page, so a folder on page 2 was
+  // "missing" and "create missing" made a second one of the same name (or got 409). {items, complete}.
+  const listFolder = (id) => {
+    const L = (window.ArstenBackup && ArstenBackup.listFolder) || (PH && PH.listFolder);
+    return L ? L(state.core, id) : state.core.req(`folders/${encodeURIComponent(id)}/items`).then((r) => ({ items: items(r), complete: true }));
+  };
+  /** {leaves: {path: id|null} for E.FOLDERS, unsure: {path: true} when not found in a listing that may be cut off,
+   *  ids: {path or parent path: id} (also E.RIGHTS_FOLDERS)} */
   async function folderIndex(rootId) {
-    const cache = new Map(), out = {}, ids = {};
-    const children = async (id) => { if (!cache.has(id)) cache.set(id, items(await state.core.req(`folders/${encodeURIComponent(id)}/items`))); return cache.get(id); };
+    const cache = new Map(), out = {}, ids = {}, unsure = {};
+    const children = (id) => { if (!cache.has(id)) cache.set(id, listFolder(id)); return cache.get(id); };
     // The tool folder _AM_Docs (renamed from _ArstenDocs on 17.11.2026): a project that still has only the old folder is
     // checked inside the old one, the same folder the tools use, so "create missing" never makes an empty second one.
-    const rootItems = rootId ? await children(rootId) : [];
-    const docs = { now: findFolder(rootItems, E.DOCS), old: findFolder(rootItems, E.DOCS_OLD) };
-    for (const path of E.FOLDERS) {
-      let id = rootId;
+    const rootList = rootId ? await children(rootId) : { items: [], complete: true };
+    const docs = { now: findFolder(rootList.items, E.DOCS), old: findFolder(rootList.items, E.DOCS_OLD) };
+    const walk = async (path) => {
+      let id = rootId, cut = false;
       const parts = path.split("/");
       for (let i = 0; i < parts.length; i++) {
-        const f = id && (i === 0 && parts[0] === E.DOCS ? docs.now || docs.old : findFolder(await children(id), parts[i]));
+        let f = null;
+        if (id) {
+          const l = await children(id);
+          f = i === 0 && parts[0] === E.DOCS ? docs.now || docs.old : findFolder(l.items, parts[i]);
+          if (!f && !l.complete) cut = true;
+        }
         id = f ? f.id : null;
         if (!id) break;
         ids[parts.slice(0, i + 1).join("/")] = id;
       }
-      out[path] = id;
-    }
-    return { leaves: out, ids, docs: { now: !!docs.now, old: !!docs.old } };
+      return { id, cut };
+    };
+    // Speed (sweep 18.11.2026): the expected folders are walked together (pool of SETUP_POOL), not one path after another;
+    // children() keeps the listing promise, so a parent shared by siblings (_AM_Docs) is still listed only once.
+    const walks = await A.mapLimit(E.FOLDERS, SETUP_POOL, walk);
+    E.FOLDERS.forEach((path, k) => { const w = walks[k]; out[path] = w.id; if (!w.id && w.cut) unsure[path] = true; });
+    await A.mapLimit((E.RIGHTS_FOLDERS || []).filter((path) => !(path in ids)), SETUP_POOL, walk);
+    return { leaves: out, unsure, ids, docs: { now: !!docs.now, old: !!docs.old } };
   }
 
+  /** Core folder rights of E.RIGHTS_FOLDERS (read only, sweep 18.11.2026): {path: {id, raw} | {id, error} | {missing}}.
+   *  The live endpoint is not verified: any error is kept per folder and the check shows "not checked" (yellow). */
+  async function folderRights(ids) {
+    const out = {};
+    await A.mapLimit(E.RIGHTS_FOLDERS || [], SETUP_POOL, async (path) => {
+      const id = ids[path];
+      if (!id) { out[path] = { missing: true }; return; }
+      try { out[path] = { id, raw: await state.core.req(`folders/${encodeURIComponent(id)}/permissions`) }; }
+      catch (e) { out[path] = { id, error: e && e.status ? String(e.status) : errText(e) }; }
+    });
+    return out;
+  }
+
+  // parallel reads (sweep 18.11.2026): the setup check 4 at a time, the record lists 3 at a time (bigger answers)
+  const SETUP_POOL = 4, LIST_POOL = 3;
   async function gatherSetup() {
     const pid = state.project.id;
     setStatus(L2("Чета групите, библиотеките и папките…", "Reading groups, libraries and folders…"));
-    const proj = await state.core.req(`projects/${encodeURIComponent(pid)}`);
-    const groups = items(await state.core.req(`groups?projectId=${encodeURIComponent(pid)}`)).map((g) => ({ id: g.id, name: g.name }));
-    const users = items(await state.core.req(`projects/${encodeURIComponent(pid)}/users`)).filter((u) => String(u.status || "ACTIVE").toUpperCase() !== "REMOVED");
+    // Speed (sweep 18.11.2026): the project, groups, users and library ids do not depend on each other - read together;
+    // libraries + policies and then the definitions go through a pool (A.mapLimit keeps the order, retries 429 / 503).
+    const [proj, groupsRaw, usersRaw, libIds] = await Promise.all([
+      state.core.req(`projects/${encodeURIComponent(pid)}`),
+      state.core.req(`groups?projectId=${encodeURIComponent(pid)}`),
+      state.core.req(`projects/${encodeURIComponent(pid)}/users`),
+      state.client.projectLibraryIds(pid)]);
+    const groups = items(groupsRaw).map((g) => ({ id: g.id, name: g.name }));
+    const users = items(usersRaw).filter((u) => String(u.status || "ACTIVE").toUpperCase() !== "REMOVED");
     const projectAdmins = users.filter((u) => String(u.role || "").toUpperCase() === "ADMIN")
       .map((u) => ({ id: u.id, email: u.email, tiduuid: u.tiduuid, name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || u.id }));
     const adminGroup = groups.find((g) => g.name === E.ADMIN_GROUP);
     const adminGroupMembers = adminGroup ? items(await state.core.req(`groups/${encodeURIComponent(adminGroup.id)}/users`)) : [];
-    const libraries = [];
-    for (const id of await state.client.projectLibraryIds(pid)) {
+    const libraries = (await A.mapLimit(libIds || [], SETUP_POOL, async (id) => {
       let l = null;
       try { l = await state.client.getLibrary(id); }
       catch (e) { if (e.status !== 403 && e.status !== 404) throw e; }
-      if (!l) continue;
+      if (!l) return null;
       // the policy has its own endpoint, GET libs/{id}/policy, like every other panel (round 9, H1); a library's own
       // body does not carry it. Unreadable (403 or any error) -> the access check says "unknown" and offers no rewrite.
       let policy = null, policyError = "";
       try { policy = await state.client.getPolicy(l.id || id); if (!policy || typeof policy !== "object") { policy = null; policyError = L2("празен отговор", "empty answer"); } }
       catch (e) { policyError = e.status ? String(e.status) : errText(e); }
-      libraries.push({ id: l.id || id, name: l.name, policy, policyError });
-    }
+      return { id: l.id || id, name: l.name, policy, policyError };
+    })).filter(Boolean);
     const snap = { projectId: pid, rootId: proj && proj.rootId, groups, libraries, defs: {}, folders: {}, folderIds: {}, projectAdmins, adminGroupMembers };
     const first = E.evaluateSetup(snap, bodies());
+    const defJobs = [];
     for (const spec of E.LIBRARIES) {
       const lib = first.libs[spec.key];
       if (!lib) continue;
       snap.defs[spec.key] = {};
-      for (const d of spec.defs) {
-        try { snap.defs[spec.key][d.id] = await state.client.request("pset", `libs/${encodeURIComponent(lib.id)}/defs/${encodeURIComponent(d.id)}`); }
-        catch (e) { if (e.status === 404) snap.defs[spec.key][d.id] = null; else throw e; }
-      }
+      for (const d of spec.defs) defJobs.push({ key: spec.key, libId: lib.id, def: d.id });
     }
-    if (snap.rootId) { const fi = await folderIndex(snap.rootId); snap.folders = fi.leaves; snap.folderIds = fi.ids; snap.docs = fi.docs; }
+    await A.mapLimit(defJobs, SETUP_POOL, async (j) => {
+      try { snap.defs[j.key][j.def] = await state.client.request("pset", `libs/${encodeURIComponent(j.libId)}/defs/${encodeURIComponent(j.def)}`); }
+      catch (e) { if (e.status === 404) snap.defs[j.key][j.def] = null; else throw e; }
+    });
+    if (snap.rootId) {
+      const fi = await folderIndex(snap.rootId);
+      snap.folders = fi.leaves; snap.foldersUnsure = fi.unsure; snap.folderIds = fi.ids; snap.docs = fi.docs;
+      snap.rights = await folderRights(fi.ids);
+    }
     return snap;
   }
 
@@ -140,7 +187,7 @@
     const n = (s) => state.setup.items.filter((i) => i.state === s).length;
     const bad = n("bad"), warn = n("warn"), unk = n("unknown");
     setStatus(() => bad || warn || unk ? L2(`${bad} за оправяне · ${warn} предупреждения${unk ? ` · ${unk} неизвестни` : ""}`, `${bad} to fix · ${warn} warnings${unk ? ` · ${unk} unknown` : ""}`)
-      : L2("Проектът е като AM_TEMPLATE.", "The project matches AM_TEMPLATE."), !!bad);
+      : L2("Проектът отговаря на шаблона.", "The project matches the template."), !!bad);
   }
 
   async function createMissing() {
@@ -160,8 +207,11 @@
         const parts = step.split("/"), name = parts.pop(), parent = ids.get(parts.join("/"));
         if (!parent) continue;
         try {
-          const have = findFolder(items(await state.core.req(`folders/${encodeURIComponent(parent)}/items`)), name);
+          const l = await listFolder(parent);   // every page (sweep 18.11.2026)
+          const have = findFolder(l.items, name);
           if (have) { ids.set(step, have.id); continue; }
+          // not found in a listing that may be cut off: it may be on a page not read - never make a second one
+          if (!l.complete) { log(false, `Папка /${step}: не е създадена – списъкът на папката е непълен, проверете в Connect`, `Folder /${step}: not created – the folder listing is incomplete, check in Connect`); continue; }
           const made = await state.core.req("folders", "POST", { name, parentId: parent });
           ids.set(step, made && made.id);
           log(true, `Папка /${step} създадена`, `Folder /${step} created`);
@@ -279,29 +329,41 @@
   // ---------- data (tabs 2 and 3) ----------
   async function loadData() {
     if (!state.setup) await runSetup();
-    const recs = [], libs = [], noAccess = [], errors = [];
+    const recs = [], libs = [], noAccess = [], errors = [], jobs = [];
     for (const spec of E.LIBRARIES) {
       const lib = state.setup.libs[spec.key];
       if (!lib) continue;
       const entry = { id: lib.id, name: lib.name, key: spec.key, policy: lib.policy, definitions: [] };
-      for (const d of spec.defs) {
-        setStatus(L2(`Чета ${lib.name} · ${d.id}…`, `Reading ${lib.name} · ${d.id}…`));
-        let m = new Map(), denied = false;
-        // L9 (round 11): a refused (403) or failing read is reported as "няма достъп" for that definition; the others go on
-        try { m = await state.client.listAll(lib.id, d.id); }
-        catch (e) {
-          if (e.status !== 404) {
-            denied = true; noAccess.push(lib.name + "|" + d.id);
-            if (e.status !== 403 && e.status !== 401) errors.push(`${lib.name} · ${d.id}: ${errText(e)}`);
-            console.warn("not readable", lib.name, d.id, e);
-          }
-        }
-        const records = [...m].map(([link, props]) => ({ lib: lib.name, def: d.id, link, props }));
-        recs.push(...records);
-        entry.definitions.push(Object.assign({ id: d.id, definition: ((state.snap.defs || {})[spec.key] || {})[d.id] || null, records }, denied ? { noAccess: true } : {}));
-      }
       libs.push(entry);
+      for (const d of spec.defs) jobs.push({ spec, lib, d, entry });
     }
+    // Speed (sweep 18.11.2026): the definitions are listed 3 at a time; the results are put together afterwards in the
+    // template's order, so the report, the CSV and the archive look as before.
+    let done = 0;
+    const progress = () => setStatus(L2(`Чета записите (${done}/${jobs.length})…`, `Reading the records (${done}/${jobs.length})…`));
+    progress();
+    const got = await A.mapLimit(jobs, LIST_POOL, async ({ lib, d }) => {
+      let m = new Map(), denied = false, error = "";
+      // L9 (round 11): a refused (403) or failing read is reported as "няма достъп" for that definition; the others go on
+      try { m = await state.client.listAll(lib.id, d.id); }
+      catch (e) {
+        if (e.status !== 404) {
+          denied = true;
+          if (e.status !== 403 && e.status !== 401) error = `${lib.name} · ${d.id}: ${errText(e)}`;
+          console.warn("not readable", lib.name, d.id, e);
+        }
+      }
+      done++; progress();
+      return { m, denied, error };
+    });
+    jobs.forEach(({ spec, lib, d, entry }, k) => {
+      const { m, denied, error } = got[k];
+      if (denied) noAccess.push(lib.name + "|" + d.id);
+      if (error) errors.push(error);
+      const records = [...m].map(([link, props]) => ({ lib: lib.name, def: d.id, link, props }));
+      recs.push(...records);
+      entry.definitions.push(Object.assign({ id: d.id, definition: ((state.snap.defs || {})[spec.key] || {})[d.id] || null, records }, denied ? { noAccess: true } : {}));
+    });
     state.data = { records: recs, libs, at: new Date(), noAccess, errors };
     const deniedLibs = [...new Set(noAccess.map((k) => k.split("|")[0]))];
     setStatus(() => `${countWord(recs.length, "запис", "записа", "record", "records")} ${L2("в", "in")} ${countWord(libs.length, "библиотека", "библиотеки", "library", "libraries")}`
@@ -344,12 +406,16 @@
     const nameOf = (id) => ((all || []).find((m) => m.id === id) || {}).name || id;
     const notLoaded = all ? all.filter((m) => !loaded.includes(m.id) && m.state !== "loaded").map((m) => m.name || m.id) : null;
     const present = new Set(), failed = new Set();
+    // Speed (sweep 18.11.2026): a GUID found in one model is not looked up again in the next ones
+    let todo = guids;
     for (const modelId of loaded) {
-      for (let i = 0; i < guids.length; i += 500) {
-        const chunk = guids.slice(i, i + 500);
+      for (let i = 0; i < todo.length; i += 500) {
+        const chunk = todo.slice(i, i + 500);
         const ids = await toRuntimeIds(modelId, chunk, failed);
         chunk.forEach((g, k) => { if (ids[k] != null) present.add(g); });
       }
+      todo = todo.filter((g) => !present.has(g));
+      if (!todo.length) break;
     }
     const unknown = new Set(guids.filter((g) => !present.has(g) && (failed.has(g) || (notLoaded && notLoaded.length))));
     return { present, unknown, failed: [...failed].filter((g) => !present.has(g)), models: loaded.map(nameOf), notLoaded };
@@ -413,7 +479,7 @@
   // ---------- render ----------
   const TABS = [["setup", "Настройка на проекта", "Project setup"], ["health", "Здраве на данните", "Data health"], ["feed", "Какво се промени", "What changed"]];
   const SECTIONS = [["groups", "Групи", "Groups"], ["libraries", "Библиотеки", "Libraries"], ["definitions", "Дефиниции", "Definitions"],
-    ["access", "Права в библиотеките", "Library access"], ["folders", "Папки", "Folders"], ["people", "Хора", "People"]];
+    ["access", "Права в библиотеките", "Library access"], ["folders", "Папки", "Folders"], ["rights", "Права в папките (клиент)", "Folder rights (client)"], ["people", "Хора", "People"]];
 
   function renderSetup() {
     const r = state.setup;
@@ -542,7 +608,7 @@
     if (t) t.onchange = (e) => { state.feed.tool = e.target.value; render(); };
   }
 
-  const run = (fn) => { if (state.busy) return; state.busy = true; render(); return guarded(fn); };
+  const run = (fn) => { if (state.busy) return; state.busy = true; render(); return guarded(fn, true); };
   document.addEventListener("click", (e) => {
     const b = e.target.closest("button");
     if (!b || !state.project) return;
